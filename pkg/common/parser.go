@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"go.uber.org/ratelimit"
 )
 
 type sliceValue []string
@@ -42,25 +44,28 @@ var (
 	ipFile     string
 	nocolor    bool //彩色打印
 	json       bool
-	tracelog   string //请求日志
-	rstfile    string //文件保存
-	verify     bool //验证模式
-	skiphttp  bool //不请求httptitle
-  nbtscan	   bool
-
+	tracelog   string  //请求日志
+	rstfile    string  //文件保存
+	tout       float64 //timeout
+	verify     bool    //验证模式
+	skiphttp   bool    //不请求httptitle
+	nbtscan    bool
+	limit      int
+	Limiter    ratelimit.Limiter
 )
 
-/**
-  命令行参数解析：
-  -i: 输入的Ip地址或者域名,以逗号分隔. 例如192.168.1.1/24,scanme.nmap.org
-  -e: 设置排除文件路径，排除文件内容为需要排除的ip地址列表
-  -c: 配置文件路径，支持从配置文件中读取ip，地址列表
-  -p: 需要扫描的端口列表，以逗号分隔，例如: 1-1000,3379,6379，和-p互斥
-  -t1000: 布尔类型，默认是扫描top100，否则扫描top1000端口，和-p互斥
-  -r: 布尔类型，表示扫描方式，随机扫描还是顺序扫描
-  -v: 验证模式，是否从文件导入进行验证
-  -nbtscan:	布尔类型，是否进行netbios扫描，默认为否
+/*
+*
 
+	命令行参数解析：
+	-i: 输入的Ip地址或者域名,以逗号分隔. 例如192.168.1.1/24,scanme.nmap.org
+	-e: 设置排除文件路径，排除文件内容为需要排除的ip地址列表
+	-c: 配置文件路径，支持从配置文件中读取ip，地址列表
+	-p: 需要扫描的端口列表，以逗号分隔，例如: 1-1000,3379,6379，和-p互斥
+	-t1000: 布尔类型，默认是扫描top100，否则扫描top1000端口，和-p互斥
+	-r: 布尔类型，表示扫描方式，随机扫描还是顺序扫描
+	-v: 验证模式，是否从文件导入进行验证
+	-nbtscan:	布尔类型，是否进行netbios扫描，默认为否
 */
 func init() {
 	flag.Var(newSliceValue([]string{}, &cmdIps), "i", "set domain and ips")
@@ -71,6 +76,7 @@ func init() {
 	flag.BoolVar(&cmdT1000, "t1000", false, "scan top1000 ports")
 	flag.BoolVar(&cmdRandom, "r", false, "random scan flag")
 	flag.IntVar(&NumThreads, "n", 800, "number of goroutines, between 1 and 2000")
+	flag.IntVar(&limit, "limit", 0, "number of goroutines, between 1 and 2000")
 	flag.Var(newSliceValue([]string{}, &excPorts), "ep", "set port ranges to exclude")
 	flag.Var(newSliceValue([]string{}, &excIps), "ei", "set ip ranges to exclude")
 	flag.StringVar(&ipFile, "l", "", "input ips file")
@@ -80,7 +86,8 @@ func init() {
 	flag.StringVar(&rstfile, "o", "rst.txt", "success log")
 	flag.BoolVar(&verify, "v", false, "verified from file")
 	flag.BoolVar(&skiphttp, "sk", false, "skip http request")
-  flag.BoolVar(&nbtscan, "nbtscan", false, "get netbios stat by UDP137 in local network")
+	flag.Float64Var(&tout, "t", 5, "tcp connect time out default 5 second")
+	flag.BoolVar(&nbtscan, "nbtscan", false, "get netbios stat by UDP137 in local network")
 
 }
 
@@ -114,9 +121,11 @@ func ArgsPrint() {
 	fmt.Println(excPorts)
 }
 
-/**
-  configeFileParse 配置文件解析函数
-  配置文件每行一条数据，可以是单个ip，域名，也可以是带掩码的ip和域名
+/*
+*
+
+	configeFileParse 配置文件解析函数
+	配置文件每行一条数据，可以是单个ip，域名，也可以是带掩码的ip和域名
 */
 func ConfigeFileParse(path string) ([]string, error) {
 	var err error

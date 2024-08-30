@@ -9,6 +9,7 @@ import (
 	rc "github.com/4dogs-cn/TXPortMap/pkg/common/rangectl"
 	"github.com/4dogs-cn/TXPortMap/pkg/conversion"
 	"github.com/4dogs-cn/TXPortMap/pkg/output"
+	"go.uber.org/ratelimit"
 	"io"
 	"net"
 	"os"
@@ -23,10 +24,11 @@ type Addr struct {
 	port uint64
 }
 
-type NBTScanIPMap struct{
+type NBTScanIPMap struct {
 	sync.Mutex
 	IPS map[string]struct{}
 }
+
 // type Range struct {
 // 	Begin uint64
 // 	End   uint64
@@ -34,7 +36,7 @@ type NBTScanIPMap struct{
 
 var (
 	Writer     output.Writer
-	NBTScanIPs = NBTScanIPMap{IPS:make(map[string]struct{})}
+	NBTScanIPs = NBTScanIPMap{IPS: make(map[string]struct{})}
 )
 
 type Engine struct {
@@ -49,9 +51,8 @@ type Engine struct {
 	Wg *sync.WaitGroup
 
 	//验证模式
-	Verify      bool
-	verList     []string
-
+	Verify  bool
+	verList []string
 }
 
 // SetIP as seen
@@ -81,15 +82,15 @@ func (e *Engine) Run() {
 	// fmt.Println(e.TaskPorts)
 
 	//验证模式
-	if e.Verify{
+	if e.Verify {
 		for _, verl := range e.verList {
-			addr.ip = strings.Split(verl,":")[0]
-			tmp_port,_:=strconv.Atoi(strings.Split(verl,":")[1])
+			addr.ip = strings.Split(verl, ":")[0]
+			tmp_port, _ := strconv.Atoi(strings.Split(verl, ":")[1])
 			addr.port = uint64(tmp_port)
 			e.TaskChan <- addr
 		}
 
-	}else {
+	} else {
 		// TODO:: if !e.RandomFlag
 		if !e.RandomFlag {
 			// 随机扫描，向任务通道随机发送addr
@@ -146,7 +147,7 @@ func (e *Engine) Parser() error {
 	// TODO:: 待增加排除ip和排除端口流程
 
 	//判断是否为验证模式
-	if verify == true{
+	if verify == true {
 		if ipFile != "" {
 			f, err := os.Open(ipFile)
 			if err != nil {
@@ -163,7 +164,7 @@ func (e *Engine) Parser() error {
 				}
 			}
 
-		}else{
+		} else {
 			fmt.Println("Input ip:port file to Verify")
 			os.Exit(1)
 		}
@@ -312,6 +313,12 @@ func (e *Engine) Parser() error {
 }
 
 func CreateEngine() *Engine {
+	if limit > 1 {
+		Limiter = ratelimit.New(limit)
+	} else {
+		Limiter = ratelimit.NewUnlimited()
+	}
+
 	return &Engine{
 		RandomFlag:  cmdRandom,
 		TaskChan:    make(chan Addr, 1000),
@@ -371,7 +378,7 @@ func scanner(ip string, port uint64) {
 				szOption = fmt.Sprintf("%s%s:%d\r\n\r\n", st_Identification_Packet[0].Packet, ip, port)
 			}
 			packet = []byte(szOption)
-		}else{
+		} else {
 			packet = st_Identification_Packet[i].Packet
 		}
 
@@ -391,10 +398,11 @@ func worker(res chan Addr, wg *sync.WaitGroup) {
 
 		for addr := range res {
 			//do netbios stat scan
-			if nbtscan && NBTScanIPs.HasIP(addr.ip) == false{
+			if nbtscan && NBTScanIPs.HasIP(addr.ip) == false {
 				NBTScanIPs.SetIP(addr.ip)
 				nbtscaner(addr.ip)
 			}
+			Limiter.Take()
 			scanner(addr.ip, addr.port)
 		}
 
@@ -411,7 +419,7 @@ func SendIdentificationPacketFunction(data []byte, ip string, port uint64) (int,
 	//fmt.Println(addr)
 	var dwSvc int = UNKNOWN_PORT
 
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	conn, err := net.DialTimeout("tcp", addr, time.Duration(tout*1000)*time.Millisecond)
 	if err != nil {
 		// 端口是closed状态
 		Writer.Request(ip, conversion.ToString(port), "tcp", fmt.Errorf("time out"))
